@@ -76,7 +76,7 @@ class ServiceBasedActorInfoAccessor : public ActorInfoAccessor {
   Status AsyncGetAll(const MultiItemCallback<rpc::ActorTableData> &callback) override;
 
   Status AsyncGetByName(
-      const std::string &name,
+      const std::string &name, const std::string &ray_namespace,
       const OptionalItemCallback<rpc::ActorTableData> &callback) override;
 
   Status AsyncRegisterActor(const TaskSpecification &task_spec,
@@ -462,6 +462,28 @@ class ServiceBasedPlacementGroupInfoAccessor : public PlacementGroupInfoAccessor
 
   Status AsyncWaitUntilReady(const PlacementGroupID &placement_group_id,
                              const StatusCallback &callback) override;
+
+ private:
+  ServiceBasedGcsClient *client_impl_;
+};
+
+class ServiceBasedInternalKVAccessor : public InternalKVAccessor {
+ public:
+  explicit ServiceBasedInternalKVAccessor(ServiceBasedGcsClient *client_impl);
+  ~ServiceBasedInternalKVAccessor() override = default;
+
+  Status AsyncInternalKVKeys(
+      const std::string &prefix,
+      const OptionalItemCallback<std::vector<std::string>> &callback) override;
+  Status AsyncInternalKVGet(const std::string &key,
+                            const OptionalItemCallback<std::string> &callback) override;
+  Status AsyncInternalKVPut(const std::string &key, const std::string &value,
+                            bool overwrite,
+                            const OptionalItemCallback<int> &callback) override;
+  Status AsyncInternalKVExists(const std::string &key,
+                               const OptionalItemCallback<bool> &callback) override;
+  Status AsyncInternalKVDel(const std::string &key,
+                            const StatusCallback &callback) override;
 
  private:
   ServiceBasedGcsClient *client_impl_;
