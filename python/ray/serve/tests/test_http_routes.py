@@ -2,6 +2,8 @@ from fastapi import FastAPI
 import pytest
 import requests
 
+from starlette.responses import RedirectResponse
+
 from ray import serve
 from ray.serve.constants import ALL_HTTP_METHODS
 
@@ -10,37 +12,41 @@ def test_path_validation(serve_instance):
     # Path prefix must start with /.
     with pytest.raises(ValueError):
 
-        @serve.ingress(path_prefix="hello")
+        @serve.deployment(route_prefix="hello")
         class D1:
+            pass
+
+    # Path prefix must not end with / unless it's the root.
+    with pytest.raises(ValueError):
+
+        @serve.deployment(route_prefix="/hello/")
+        class D2:
             pass
 
     # Wildcards not allowed with new ingress support.
     with pytest.raises(ValueError):
 
-        @serve.ingress(path_prefix="/{wildcard}")
-        class D2:
+        @serve.deployment(route_prefix="/{hello}")
+        class D3:
             pass
 
-    @serve.deployment("test")
-    @serve.ingress(path_prefix="/duplicate")
-    class D3:
+    @serve.deployment(route_prefix="/duplicate")
+    class D4:
         pass
 
-    D3.deploy()
+    D4.deploy()
 
     # Reject duplicate route.
     with pytest.raises(ValueError):
-        D3.options(name="test2").deploy()
+        D4.options(name="test2").deploy()
 
 
 def test_routes_endpoint(serve_instance):
-    @serve.deployment("D1")
-    @serve.ingress
+    @serve.deployment
     class D1:
         pass
 
-    @serve.deployment("D2")
-    @serve.ingress(path_prefix="/hello/world")
+    @serve.deployment(route_prefix="/hello/world")
     class D2:
         pass
 
@@ -49,73 +55,106 @@ def test_routes_endpoint(serve_instance):
 
     routes = requests.get("http://localhost:8000/-/routes").json()
 
-    assert len(routes) == 2
-    assert routes["/D1"] == ["D1", ["GET", "POST"]]
-    assert routes["/hello/world"] == ["D2", ["GET", "POST"]]
+    assert len(routes) == 2, routes
+    assert "/D1" in routes, routes
+    assert routes["/D1"] == ["D1", ALL_HTTP_METHODS], routes
+    assert "/hello/world" in routes, routes
+    assert routes["/hello/world"] == ["D2", ALL_HTTP_METHODS], routes
 
     D1.delete()
 
     routes = requests.get("http://localhost:8000/-/routes").json()
-    assert len(routes) == 1
-    assert routes["/hello/world"] == ["D2", ["GET", "POST"]]
+    assert len(routes) == 1, routes
+    assert "/hello/world" in routes, routes
+    assert routes["/hello/world"] == ["D2", ALL_HTTP_METHODS], routes
 
     D2.delete()
     routes = requests.get("http://localhost:8000/-/routes").json()
-    assert len(routes) == 0
+    assert len(routes) == 0, routes
 
     app = FastAPI()
 
-    @serve.deployment("D3")
-    @serve.ingress(app, path_prefix="/hello")
+    @serve.deployment(route_prefix="/hello")
+    @serve.ingress(app)
     class D3:
         pass
 
     D3.deploy()
 
     routes = requests.get("http://localhost:8000/-/routes").json()
+    assert len(routes) == 1, routes
+    assert "/hello" in routes, routes
+    assert routes["/hello"] == ["D3", ALL_HTTP_METHODS], routes
+
+
+def test_deployment_options_default_route(serve_instance):
+    @serve.deployment(name="1")
+    class D1:
+        pass
+
+    D1.deploy()
+
+    routes = requests.get("http://localhost:8000/-/routes").json()
     assert len(routes) == 1
-    assert routes["/hello"] == ["D3", ALL_HTTP_METHODS]
+    assert "/1" in routes, routes
+    assert routes["/1"] == ["1", ALL_HTTP_METHODS]
+
+    D1.options(name="2").deploy()
+
+    routes = requests.get("http://localhost:8000/-/routes").json()
+    assert len(routes) == 2
+    assert "/1" in routes, routes
+    assert routes["/1"] == ["1", ALL_HTTP_METHODS]
+    assert "/2" in routes, routes
+    assert routes["/2"] == ["2", ALL_HTTP_METHODS]
 
 
 def test_path_prefixing(serve_instance):
-    def req(subpath):
-        return requests.get(f"http://localhost:8000{subpath}").text
+    def check_req(subpath, text=None, status=None):
+        r = requests.get(f"http://localhost:8000{subpath}")
+        if text is not None:
+            assert r.text == text, f"{r.text} != {text}"
+        if status is not None:
+            assert r.status_code == status, f"{r.status_code} != {status}"
 
-    @serve.deployment("D1")
-    @serve.ingress(path_prefix="/")
+        return r
+
+    @serve.deployment(route_prefix="/hello")
     class D1:
         def __call__(self, *args):
             return "1"
 
     D1.deploy()
-    assert req("/") == "1"
-    assert req("/a") != "1"
+    check_req("/", status=404)
+    check_req("/hello", text="1")
+    check_req("/hello/", text="1")
+    check_req("/hello/a", text="1")
 
-    @serve.deployment("D2")
-    @serve.ingress(path_prefix="/hello")
+    @serve.deployment(route_prefix="/")
     class D2:
         def __call__(self, *args):
             return "2"
 
     D2.deploy()
-    assert req("/") == "1"
-    assert req("/hello") == "2"
+    check_req("/hello/", text="1")
+    check_req("/hello/a", text="1")
+    check_req("/", text="2")
+    check_req("/a", text="2")
 
-    @serve.deployment("D3")
-    @serve.ingress(path_prefix="/hello/world")
+    @serve.deployment(route_prefix="/hello/world")
     class D3:
         def __call__(self, *args):
             return "3"
 
     D3.deploy()
-    assert req("/") == "1"
-    assert req("/hello") == "2"
-    assert req("/hello/world") == "3"
+    check_req("/hello/", text="1")
+    check_req("/", text="2")
+    check_req("/hello/world/", text="3")
 
     app = FastAPI()
 
-    @serve.deployment("D4")
-    @serve.ingress(app, path_prefix="/hello/world/again")
+    @serve.deployment(route_prefix="/hello/world/again")
+    @serve.ingress(app)
     class D4:
         @app.get("/")
         def root(self):
@@ -126,12 +165,50 @@ def test_path_prefixing(serve_instance):
             return p
 
     D4.deploy()
-    assert req("/") == "1"
-    assert req("/hello") == "2"
-    assert req("/hello/world") == "3"
-    assert req("/hello/world/again") == "4"
-    assert req("/hello/world/again/") == "4"
-    assert req("/hello/world/again/hi") == '"hi"'
+    check_req("/hello/") == "1"
+    check_req("/") == "2"
+    check_req("/hello/world/") == "3"
+    check_req("/hello/world/again/") == "4"
+    check_req("/hello/world/again/hi") == '"hi"'
+
+
+# NOTE(edoakes): this does not currently work with a non-root route_prefix.
+# @pytest.mark.parametrize("base_path", ["", "subpath"])
+@pytest.mark.parametrize("base_path", [""])
+def test_redirect(serve_instance, base_path):
+    app = FastAPI()
+
+    route_prefix = f"/{base_path}"
+
+    @serve.deployment(route_prefix=route_prefix)
+    @serve.ingress(app)
+    class D:
+        @app.get("/")
+        def root(self):
+            return "hello from /"
+
+        @app.get("/redirect")
+        def redirect_root(self):
+            return RedirectResponse(url=app.url_path_for("root"))
+
+        @app.get("/redirect2")
+        def redirect_twice(self):
+            return RedirectResponse(url=app.url_path_for("redirect_root"))
+
+    D.deploy()
+
+    if route_prefix != "/":
+        route_prefix += "/"
+
+    r = requests.get(f"http://localhost:8000{route_prefix}redirect")
+    assert len(r.history) == 1
+    assert r.status_code == 200
+    assert r.json() == "hello from /"
+
+    r = requests.get(f"http://localhost:8000{route_prefix}redirect2")
+    assert len(r.history) == 2
+    assert r.status_code == 200
+    assert r.json() == "hello from /"
 
 
 if __name__ == "__main__":

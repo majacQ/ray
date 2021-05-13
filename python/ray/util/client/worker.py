@@ -248,6 +248,12 @@ class Worker:
         if client_ref_id is not None:
             req.client_ref_id = client_ref_id
         resp = self.data_client.PutObject(req)
+        if not resp.valid:
+            try:
+                raise cloudpickle.loads(resp.error)
+            except pickle.UnpicklingError:
+                logger.exception("Failed to deserialize {}".format(resp.error))
+                raise
         return ClientObjectRef(resp.id)
 
     # TODO(ekl) respect MAX_BLOCKING_OPERATION_TIME_S for wait too
@@ -268,7 +274,7 @@ class Worker:
         data = {
             "object_ids": [object_ref.id for object_ref in object_refs],
             "num_returns": num_returns,
-            "timeout": timeout if timeout else -1,
+            "timeout": timeout if (timeout is not None) else -1,
             "client_id": self._client_id,
         }
         req = ray_client_pb2.WaitRequest(**data)
@@ -358,7 +364,7 @@ class Worker:
         try:
             term = ray_client_pb2.TerminateRequest(actor=term_actor)
             term.client_id = self._client_id
-            self.server.Terminate(term)
+            self.server.Terminate(term, metadata=self.metadata)
         except grpc.RpcError as e:
             raise decode_exception(e.details())
 
@@ -375,7 +381,7 @@ class Worker:
         try:
             term = ray_client_pb2.TerminateRequest(task_object=term_object)
             term.client_id = self._client_id
-            self.server.Terminate(term)
+            self.server.Terminate(term, metadata=self.metadata)
         except grpc.RpcError as e:
             raise decode_exception(e.details())
 
@@ -505,6 +511,10 @@ class Worker:
     def _get_converted(self, key: str) -> "ClientStub":
         """Given a UUID, return the converted object"""
         return self._converted[key]
+
+    def _converted_key_exists(self, key: str) -> bool:
+        """Check if a key UUID is present in the store of converted objects."""
+        return key in self._converted
 
 
 def make_client_id() -> str:
